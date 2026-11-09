@@ -109,7 +109,7 @@ class PluginHost:
         return (self._channel is not None and self._channel.closed_reason is None
                 and self._proc is not None and self._proc.poll() is None)
 
-    def _build_base_context(self) -> contextvars.Context:
+    def _build_base_context(self, *, bind_secrets: bool = False) -> contextvars.Context:
         # A fresh context, not a copy of whichever caller created the host: requests with no
         # caller (a ``spawn_task`` loop) must not inherit that caller's session or approvals.
         context = contextvars.Context()
@@ -117,9 +117,10 @@ class PluginHost:
         def bind() -> None:
             from hermes_constants import set_hermes_home_override
             set_hermes_home_override(self._home)
-            from agent.secret_scope import build_profile_secret_scope, is_multiplex_active, set_secret_scope
-            if is_multiplex_active():
-                set_secret_scope(build_profile_secret_scope(self._home), profile_home=str(self._home))
+            from agent.secret_scope import is_multiplex_active, set_secret_scope
+            if bind_secrets or is_multiplex_active():
+                from tui_gateway.launch_profile_policy import owner_secret_scope
+                set_secret_scope(owner_secret_scope(self._home), profile_home=str(self._home))
 
         context.run(bind)
         return context
@@ -397,7 +398,9 @@ class PluginHost:
     def _context_for_origin(self, origin: Optional[int]) -> contextvars.Context:
         channel = self._channel
         caller = channel.context_of(origin) if channel is not None else None
-        return (caller or self._base_context).copy()
+        # A host can predate multiplex activation. Rebind a spontaneous callback from its
+        # canonical owner now; never reuse the startup context or an ended caller's policy.
+        return caller.copy() if caller is not None else self._build_base_context(bind_secrets=True)
 
     def _handle(self, method: str, params: dict[str, Any], _origin: Optional[int]) -> Any:
         if method == "ctx":

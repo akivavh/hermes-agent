@@ -379,7 +379,6 @@ class Channel:
     def _serve(self, message: dict[str, Any]) -> None:
         request_id = message.get("id")
         origin = message.get("origin")
-        context = self._context_for_origin(origin) if self._context_for_origin else None
 
         def run() -> dict[str, Any]:
             token = _SERVING.set(request_id)
@@ -394,7 +393,12 @@ class Channel:
             finally:
                 _SERVING.reset(token)
 
-        reply = (context or contextvars.copy_context()).run(run)
+        try:
+            context = self._context_for_origin(origin) if self._context_for_origin else None
+            reply = (context if context is not None else contextvars.copy_context()).run(run)
+        except BaseException as exc:  # preparation can fail before run() handles the request
+            logger.debug("%s: request context preparation failed", self._name, exc_info=True)
+            reply = {"id": request_id, "error": error_payload(exc)}
         if request_id is None:
             return
         try:
